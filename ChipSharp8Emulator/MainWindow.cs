@@ -13,5 +13,11 @@ namespace ChipSharp8Emulator {
         public MainWindow() {
             InitializeComponent();
         }
+
+        public Chip8 chip8;
+
+        private void MainWindow_FormClosing(object sender, FormClosingEventArgs e) {
+            chip8.Stop();
+        }
     }
 }

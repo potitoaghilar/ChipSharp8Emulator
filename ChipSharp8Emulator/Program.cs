@@ -13,7 +13,7 @@ namespace ChipSharp8Emulator {
         static void Main(string[] args) {
             
             Chip8 chip8 = new Chip8();
-            chip8.LoadROM("./rom/VBRIX");
+            chip8.LoadROM("./rom/WIPEOFF");
             //chip8.LoadROM("./rom/pong.rom");
             chip8.onRenderListener += Chip8_onRenderListener;
             chip8.Run();
@@ -21,6 +21,9 @@ namespace ChipSharp8Emulator {
         }
 
         private static void Chip8_onRenderListener(Graphics g, byte[] pixels, int width, int height, int zoom) {
+
+            if (g == null) { return; }
+
             for (int y = 0; y < height; y++) {
                 for (int x = 0; x < width; x++) {
 

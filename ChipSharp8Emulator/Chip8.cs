@@ -9,14 +9,16 @@ using System.Threading.Tasks;
 
 namespace ChipSharp8Emulator {
 
-    class Chip8 {
+    public class Chip8 {
 
         // Main objects
         private byte[] memory;
         private byte[] registers;
         private ushort[] stack;
-        //private byte[] input;
+        private byte[] input;
         private byte[] display;
+        private byte delay_timer;
+        private byte sound_timer;
 
         // Pointers
         private ushort pc; // Program counter
@@ -47,14 +49,16 @@ namespace ChipSharp8Emulator {
         public event OnRenderListener onRenderListener;
         public delegate void OnRenderListener(Graphics g, byte[] pixels, int width, int height, int zoom);
 
+        Random random = new Random();
+
         public Chip8() {
 
             // Create objects
             memory = new byte[memorySize];
             registers = new byte[16];
             stack = new ushort[stackSize];
-            //input = new Input();
-            display = new byte[displayWidth * displayHeight];
+            input = new byte[16];
+            display = new byte[(displayWidth + 1) * (displayHeight + 1)];
 
             // Init pointers
             pc = memoryEntryPoint;
@@ -82,6 +86,7 @@ namespace ChipSharp8Emulator {
                 mainWindow.Text += romName;
                 mainWindow.ClientSize = new Size(640, 320);
                 g = mainWindow.Controls["container"].CreateGraphics();
+                mainWindow.chip8 = this;
                 mainWindow.ShowDialog();
             }).Start();
         }
@@ -117,7 +122,7 @@ namespace ChipSharp8Emulator {
             
             runThread = new Thread(() => {
                 while (isRunning) {
-
+                    
                     ExecuteCycle();
                     Thread.Sleep(16); // 60 FPS
 
@@ -128,8 +133,7 @@ namespace ChipSharp8Emulator {
         }
 
         public void Stop() {
-            //isRunning = false;
-            pc += 2;
+            isRunning = false;
         }
 
         private void ExecuteCycle() {
@@ -146,7 +150,9 @@ namespace ChipSharp8Emulator {
                         switch (opcode & 0x0FFF) {
 
                             case 0x00E0: { // 00E0: Clears the screen.
-                                    display = new byte[displayWidth * displayHeight];
+                                    for (int i = 0; i < display.Length; i++) {
+                                        display[i] = 0;
+                                    }
                                     pc += 2;
                                     Console.WriteLine("Clears the screen");
                                     break;
@@ -154,7 +160,7 @@ namespace ChipSharp8Emulator {
 
                             case 0x00EE: { // 00EE: Returns from a subroutine.
                                     sp--;
-                                    pc = stack[sp];
+                                    pc = (ushort)(stack[sp] + 2);
                                     stack[sp] = 0;
                                     Console.WriteLine("Returns from a subroutine at " + Utils.toHex(pc));
                                     break;
@@ -178,10 +184,9 @@ namespace ChipSharp8Emulator {
                     }
 
                 case 0x2000: { // 2NNN: Calls subroutine at NNN.
-                        stack[sp] = pc;
+                        stack[sp++] = pc;
                         ushort nnn = (ushort)(opcode & 0x0FFF);
                         pc = nnn;
-                        sp++;
                         Console.WriteLine("Calls subroutine at " + Utils.toHex(nnn));
                         break;
                     }
@@ -194,7 +199,28 @@ namespace ChipSharp8Emulator {
                         } else {
                             pc += 2;
                         }
-                        Console.WriteLine("Skip next instruction if V" + Utils.toHex(x, false) + " == " + Utils.toHex(nn, true));
+                        Console.WriteLine("Skip next instruction if V" + Utils.toHex(x, false) + " == " + Utils.toHex(nn) + ". Jump is " + (registers[x] == nn ? "" : "NOT ") + "taken!");
+                        break;
+                    }
+
+                case 0x4000: { // 4XNN: Skips the next instruction if VX doesn't equal NN. (Usually the next instruction is a jump to skip a code block)
+                        byte x = (byte)((opcode & 0x0F00) >> 8);
+                        byte nn = (byte)(opcode & 0x00FF);
+                        if (registers[x] != nn) {
+                            pc += 4;
+                        } else {
+                            pc += 2;
+                        }
+                        Console.WriteLine("Skips the next instruction if V" + Utils.toHex(x, false) + " != " + Utils.toHex(nn) + ". Jump is " + (registers[x] != nn ? "" : "NOT ") + "taken!");
+                        break;
+                    }
+
+                case 0x6000: { // 6XNN: Sets VX to NN.
+                        byte x = (byte)((opcode & 0x0F00) >> 8);
+                        byte nn = (byte)(opcode & 0x00FF);
+                        registers[x] = nn;
+                        pc += 2;
+                        Console.WriteLine("Sets V" + Utils.toHex(x, false) + " to " + Utils.toHex(nn));
                         break;
                     }
 
@@ -207,11 +233,72 @@ namespace ChipSharp8Emulator {
                         break;
                     }
 
+                case 0x8000: {
+
+                        switch (opcode & 0x000F) {
+
+                            case 0x0000: { // 8XY0: Sets VX to the value of VY.
+                                    byte x = (byte)((opcode & 0x0F00) >> 8);
+                                    byte y = (byte)((opcode & 0x00F0) >> 4);
+                                    registers[x] = registers[y];
+                                    pc += 2;
+                                    Console.WriteLine("Sets V" + Utils.toHex(x, false) + " to the value of V" + Utils.toHex(y, false));
+                                    break;
+                                }
+
+                            case 0x0002: { // 8XY2: Sets VX to VX and VY. (Bitwise AND operation)
+                                    byte x = (byte)((opcode & 0x0F00) >> 8);
+                                    byte y = (byte)((opcode & 0x00F0) >> 4);
+                                    registers[x] &= registers[y];
+                                    pc += 2;
+                                    Console.WriteLine("Sets V" + Utils.toHex(x, false) + " to " + registers[x]);
+                                    break;
+                                }
+
+                            case 0x0004: { // 8XY4: Adds VY to VX. VF is set to 1 when there's a carry, and to 0 when there isn't.
+                                    byte x = (byte)((opcode & 0x0F00) >> 8);
+                                    byte y = (byte)((opcode & 0x00F0) >> 4);
+                                    registers[0xF] = (byte)(((registers[x] + registers[y]) & 0xF00) >> 8);
+                                    registers[x] += registers[y];
+                                    pc += 2;
+                                    Console.WriteLine("Adds V" + Utils.toHex(y, false) + " to V" + Utils.toHex(x));
+                                    break;
+                                }
+
+                            case 0x0005: { // 8XY5: VY is subtracted from VX. VF is set to 0 when there's a borrow, and 1 when there isn't.
+                                    byte x = (byte)((opcode & 0x0F00) >> 8);
+                                    byte y = (byte)((opcode & 0x00F0) >> 4);
+                                    registers[0xF] = (byte)(registers[x] < registers[y] ? 0 : 1);
+                                    registers[x] -= registers[y];
+                                    pc += 2;
+                                    Console.WriteLine("V" + Utils.toHex(y, false) + " is subtracted from V" + Utils.toHex(x, false));
+                                    break;
+                                }
+
+                            default: {
+                                    NotImplementedYet();
+                                    Stop();
+                                    break;
+                                }
+                        }
+
+                        break;
+                    }
+
                 case 0xA000: { // ANNN: Sets I to the address NNN.
                         ushort nnn = (ushort)(opcode & 0x0FFF);
                         I = nnn;
                         pc += 2;
                         Console.WriteLine("Sets I to the addess " + Utils.toHex(nnn));
+                        break;
+                    }
+
+                case 0xC000: { // CXNN: Sets VX to the result of a bitwise and operation on a random number (Typically: 0 to 255) and NN.
+                        byte x = (byte)((opcode & 0x0F00) >> 8);
+                        ushort nn = (ushort)(opcode & 0x00FF);
+                        registers[x] = (byte)(random.Next(0, 256) & nn);
+                        pc += 2;
+                        Console.WriteLine("Sets V" + Utils.toHex(x, false) + " to " + Utils.toHex(nn));
                         break;
                     }
 
@@ -229,8 +316,9 @@ namespace ChipSharp8Emulator {
                                     pixelColor = 0xFF;
                                 }
 
-                                // Collision detection
                                 int pixelIndex = (registers[y] + i) * displayWidth + registers[x] + o;
+
+                                // Collision detection
                                 if (display[pixelIndex] == 0xFF && pixelColor == 0x0) {
                                     registers[0xF] = 0x1;
                                 }
@@ -246,18 +334,79 @@ namespace ChipSharp8Emulator {
                         break;
                     }
 
-                case 0x6000: { // 6XNN: Sets VX to NN.
-                        byte x = (byte)((opcode & 0x0F00) >> 8);
-                        byte nn = (byte)(opcode & 0x00FF);
-                        registers[x] = nn;
-                        pc += 2;
-                        Console.WriteLine("Sets V" + Utils.toHex(x, false) + " to " + Utils.toHex(nn));
+                case 0xE000: {
+
+                        switch (opcode & 0x00FF) {
+
+                            case 0x009E: { // EX9E: Skips the next instruction if the key stored in VX is pressed. (Usually the next instruction is a jump to skip a code block)
+                                    byte x = (byte)((opcode & 0x0F00) >> 8);
+                                    bool condition = input[registers[x]] == 1;
+                                    if (condition) {
+                                        pc += 4;
+                                    } else {
+                                        pc += 2;
+                                    }
+                                    Console.WriteLine("Skips the next instruction if the key stored in V" + Utils.toHex(x, false) + " is pressed. Jump is " + (condition ? "" : "NOT ") + "taken");
+                                    break;
+                                }
+
+                            case 0x00A1: { // EXA1: Skips the next instruction if the key stored in VX isn't pressed. (Usually the next instruction is a jump to skip a code block)
+                                    byte x = (byte)((opcode & 0x0F00) >> 8);
+                                    bool condition = input[registers[x]] == 0;
+                                    if (condition) {
+                                        pc += 4;
+                                    } else {
+                                        pc += 2;
+                                    }
+                                    Console.WriteLine("Skips the next instruction if the key stored in V" + Utils.toHex(x, false) + " isn't pressed. Jump is " + (condition ? "" : "NOT ") + "taken");
+                                    break;
+                                }
+
+                            default: {
+                                    NotImplementedYet();
+                                    Stop();
+                                    break;
+                                }
+                        }
+
                         break;
                     }
 
                 case 0xF000: {
 
                         switch (opcode & 0x00FF) {
+
+                            case 0x001E: { // FX1E: Adds VX to I.
+                                    byte x = (byte)((opcode & 0x0F00) >> 8);
+                                    I += registers[x];
+                                    pc += 2;
+                                    Console.WriteLine("Adds V" + Utils.toHex(x, false) + " to I");
+                                    break;
+                                }
+
+                            case 0x0007: { // FX07: Sets VX to the value of the delay timer.
+                                    byte x = (byte)((opcode & 0x0F00) >> 8);
+                                    registers[x] = delay_timer;
+                                    pc += 2;
+                                    Console.WriteLine("Sets V" + Utils.toHex(x, false) + " to the value of the delay timer: " + Utils.toHex(delay_timer));
+                                    break;
+                                }
+
+                            case 0x0015: { // FX15: Sets the delay timer to VX.
+                                    byte x = (byte)((opcode & 0x0F00) >> 8);
+                                    delay_timer = registers[x];
+                                    pc += 2;
+                                    Console.WriteLine("Sets the delay timer to V" + Utils.toHex(x, false) + ": " + Utils.toHex(delay_timer));
+                                    break;
+                                }
+
+                            case 0x0018: { // FX18: Sets the sound timer to VX.
+                                    byte x = (byte)((opcode & 0x0F00) >> 8);
+                                    sound_timer = registers[x];
+                                    pc += 2;
+                                    Console.WriteLine("Sets the sound timer to V" + Utils.toHex(x, false) + ": " + Utils.toHex(sound_timer));
+                                    break;
+                                }
 
                             case 0x0029: { // FX29: Sets I to the location of the sprite for the character in VX. Characters 0-F (in hexadecimal) are represented by a 4x5 font.
                                     byte x = (byte)((opcode & 0x0F00) >> 8);
@@ -306,6 +455,14 @@ namespace ChipSharp8Emulator {
                         Stop();
                         break;
                     }
+            }
+
+            // Decrease timers
+            if (delay_timer > 0) {
+                delay_timer--;
+            }
+            if (sound_timer > 0) {
+                sound_timer--;
             }
 
             if (needRender) {
